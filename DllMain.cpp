@@ -888,6 +888,8 @@ LPCSTR CustomAlternativeMaxForceLeft;
 LPCSTR CustomAlternativeMaxForceRight;
 LPCSTR CustomMaxForce;
 
+HANDLE hJogconSerialPort = NULL;
+
 // settings
 wchar_t* settingsFilename = TEXT(".\\FFBPlugin.ini");
 int configMinForce = GetPrivateProfileInt(TEXT("Settings"), TEXT("MinForce"), 0, settingsFilename);
@@ -946,6 +948,8 @@ int StepFFBStrength = GetPrivateProfileInt(TEXT("Settings"), TEXT("StepFFBStreng
 int EnableFFBStrengthPersistence = GetPrivateProfileInt(TEXT("Settings"), TEXT("EnableFFBStrengthPersistence"), 0, settingsFilename);
 int EnableFFBStrengthTextToSpeech = GetPrivateProfileInt(TEXT("Settings"), TEXT("EnableFFBStrengthTextToSpeech"), 0, settingsFilename);
 int InputDeviceWheelEnable = GetPrivateProfileInt(TEXT("Settings"), TEXT("InputDeviceWheelEnable"), 0, settingsFilename);
+wchar_t* jogconSerialPortString = new wchar_t[10];
+int JogconSerialPort = GetPrivateProfileString(TEXT("Settings"), TEXT("JogconSerialPort"), NULL, jogconSerialPortString, 10, settingsFilename);
 
 extern void DefaultConfigValues();
 extern void CustomFFBStrengthSetup();
@@ -1023,6 +1027,66 @@ const int D1_GP = 55;
 const int WMMT_5DXPlus = 56;
 const int WMMT_5DX = 57;
 const int Crazy_Taxi = 58;
+
+void CloseJogconSerial() {
+	hlp.log("closing serial port");
+	CloseHandle(hJogconSerialPort); //close the handle
+	hJogconSerialPort = NULL;
+	Sleep(500);
+}
+
+void OpenJogconSerial() {
+	hlp.log("openning serial port for Arduino/Jogcon");
+	char jogcon_port[10];
+	sprintf(jogcon_port, "%S", jogconSerialPortString);
+	hlp.log(jogcon_port);
+
+	//HANDLE hSerial;
+	hJogconSerialPort = CreateFileW(jogconSerialPortString, // L"\\\\.\\COM1"
+		GENERIC_READ | GENERIC_WRITE,
+		0,
+		0,
+		OPEN_EXISTING,
+		FILE_ATTRIBUTE_NORMAL,
+		0);
+
+	if (hJogconSerialPort == INVALID_HANDLE_VALUE) {
+		if (GetLastError() == ERROR_FILE_NOT_FOUND)
+			hlp.log("serial port does not exist");
+		hlp.log("failed to open serial port");
+		hJogconSerialPort = NULL;
+	}
+	else {
+		DCB dcb;
+		dcb.BaudRate = CBR_9600; //9600 Baud
+		dcb.ByteSize = 8; //8 data bits
+		dcb.Parity = NOPARITY; //no parity
+		dcb.StopBits = ONESTOPBIT; //1 stop
+		if (SetCommState(hJogconSerialPort, &dcb)) {
+			hlp.log("successfully opened serial port");
+		}
+		else {
+			//JogconSerialPort = 0; //disable serial port
+			hlp.log("failed to set port settings");
+			CloseJogconSerial();//close the handle
+		}
+	}
+}
+
+void WriteJogconSerial(const byte* data) {
+	DWORD byteswritten;
+	bool retVal = WriteFile(hJogconSerialPort, data, 1, &byteswritten, NULL);
+}
+
+byte ConvertPercentToJogcon(const double value)
+{
+	const byte in_min = 0;
+	const byte in_max = 1;
+	const byte out_min = 0;
+	const byte out_max = 15;
+	return (byte)((min(value, in_max) - in_min) * (out_max - out_min) / (in_max - in_min) + out_min);
+}
+
 
 HINSTANCE Get_hInstance()
 {
@@ -1220,6 +1284,17 @@ double lastSineEffectPeriodDevice3 = 0;
 
 void TriggerConstantEffect(int direction, double strength)
 {
+	//Jogcon serial
+	//JOGCON_MODE_STOP=0x00; JOGCON_MODE_RIGHT=0x10; JOGCON_MODE_LEFT=0x20; JOGCON_MODE_HOLD=0x30;
+	const byte JOGCON_MODE_CCW = 0x20;
+	const byte JOGCON_MODE_CW = 0x10;
+	if (hJogconSerialPort != NULL)
+	{
+		byte jogconMotorLevelAndMode = (direction == 1) ? JOGCON_MODE_CCW : JOGCON_MODE_CW; //CCW or CW
+		jogconMotorLevelAndMode |= ConvertPercentToJogcon(strength); //range is 0 to 15
+		WriteJogconSerial(&jogconMotorLevelAndMode);
+	}
+
 	SDL_HapticEffect tempEffect;
 	SDL_memset(&tempEffect, 0, sizeof(SDL_HapticEffect));
 	tempEffect.type = SDL_HAPTIC_CONSTANT;
@@ -3322,6 +3397,11 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ulReasonForCall, LPVOID lpReserved)
 			break;
 		}
 
+		if (JogconSerialPort != 0)//Serial port is defined in ini file?
+		{
+			OpenJogconSerial();
+		}
+
 		SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
 
 		hlp.log("creating ffb loop thread...");
@@ -3387,6 +3467,13 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ulReasonForCall, LPVOID lpReserved)
 		if (haptic3)
 		{
 			SDL_HapticClose(haptic3);
+		}
+
+		if (hJogconSerialPort != NULL)
+		{
+			//send a "disable motor" command before closing the port
+			WriteJogconSerial((byte)0x00);
+			CloseJogconSerial();
 		}
 
 		break;
